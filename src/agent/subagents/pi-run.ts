@@ -29,7 +29,12 @@ export interface SubagentRunOptions {
 	messages?: AgentMessage[];
 	/** Fresh-run prompt text (mutually exclusive with a continuation). */
 	prompt?: string;
-	/** Max model calls (the old stepCountIs safety net). */
+	/** Max model calls (the old stepCountIs safety net). Once the run has
+	 *  seen a usage-bearing turn, zero-usage turns are not model calls
+	 *  (claude-code admits a response's parallel tool calls one MCP request
+	 *  at a time) and do not count. A provider that never reports usage
+	 *  counts every turn. A hard backstop of maxTurns × RAW_TURN_BACKSTOP
+	 *  raw turns bounds the run either way. */
 	maxTurns: number;
 	/** Abort mid-model-call (the real-kill semantics). */
 	abortSignal?: AbortSignal;
@@ -65,9 +70,14 @@ export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
 	return override ?? piEngineFor(role);
 }
 
+/** Raw-turn backstop multiplier over maxTurns (see SubagentRunOptions). */
+const RAW_TURN_BACKSTOP = 4;
+
 export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult> {
 	const engine = subagentEngine(opts.role, opts.engine);
-	let turns = 0;
+	let modelCalls = 0;
+	let rawTurns = 0;
+	let reportsUsage = false;
 	let endedAtTurnCap = false;
 	// Debug recorder (owner, 2026-10-04): raw provider events per job run.
 	const providerEvents = opts.chatId ? providerEventObserver(opts.chatId, `job:${opts.role}`) : undefined;
@@ -89,9 +99,13 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		// 0.87.1: shouldStopAfterTurn → finishTurn (same call point; "end"
 		// exits before the steering poll, exactly the old boolean-true).
 		finishTurn: (turn) => {
-			turns++;
+			rawTurns++;
+			if (turn.message.usage.totalTokens > 0) {
+				modelCalls++;
+				reportsUsage = true;
+			} else if (!reportsUsage) modelCalls++;
 			if (opts.shouldStop?.(turn.message, turn.toolResults) === true) return { action: "end" };
-			if (turns < opts.maxTurns) return undefined;
+			if (modelCalls < opts.maxTurns && rawTurns < opts.maxTurns * RAW_TURN_BACKSTOP) return undefined;
 			endedAtTurnCap = turn.message.stopReason === "toolUse";
 			return { action: "end" };
 		},
