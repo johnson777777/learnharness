@@ -666,6 +666,73 @@ describe("research runner (async protocol §3)", () => {
 		assert.equal(isSubagentFailure("research", done.result as ResearchResult), false);
 	});
 
+	/** A researcher that never stops calling tools: each turn carries a
+	 *  progress note + a web_search call (search unavailable → recoverable
+	 *  text, zero network). `finalBriefAt` swaps that turn for a text-only
+	 *  brief. Returns the engine and a call counter. */
+	function toolLoopResearcher(turns: number, finalBriefAt?: number): { engine: PiEngine; calls: () => number } {
+		let calls = 0;
+		const steps: FauxResponseStep[] = Array.from({ length: turns }, (_, i) => () => {
+			calls++;
+			if (finalBriefAt === i + 1) return fauxAssistantMessage([fauxText(BRIEF)]);
+			return fauxAssistantMessage(
+				[fauxText(`One last check (turn ${i + 1}), then I'll write the brief.`), fauxToolCall("web_search", { query: `q${i}` }, { id: `loop-${i}` })],
+				{ stopReason: "toolUse" },
+			);
+		});
+		return { engine: fauxEngine(steps), calls: () => calls };
+	}
+
+	it("a researcher that runs out of turns before its brief fails honestly (no progress note posing as a brief)", async () => {
+		const chat = chatStore.createChat("Test: research turn cap");
+		trackChat(chat.id);
+		chatStore.saveMessages(chat.id, nativeToolMessages("hi", "research", "call-cap1", RESEARCH_INPUT));
+		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-cap1" });
+		trackJob(job.id);
+		const delivery = fakeDeliver();
+		const runner = createJobRunner({ chatStore, jobStore, deliver: delivery.deliver, searchProvider: () => null });
+		const scripted = toolLoopResearcher(31);
+		researchModelOverride.current = scripted.engine;
+		try {
+			await runner.runJob(job.id);
+		} finally {
+			researchModelOverride.current = undefined;
+		}
+
+		assert.equal(scripted.calls(), 30, "the researcher's turn limit is 30");
+		const errored = jobStore.getJob(job.id)!;
+		assert.equal(errored.status, "error");
+		assert.match(errored.error ?? "", /30-turn limit before writing a brief/);
+		const result = errored.result as ResearchResult;
+		assert.match(result.brief, /^Research failed: the researcher hit its 30-turn limit before writing a brief/);
+		assert.doesNotMatch(result.brief, /One last check/);
+		assert.deepEqual(result.sources, []);
+		assert.equal(isSubagentFailure("research", result), true);
+		assert.equal(delivery.steers.length, 1, "the failure still steers");
+	});
+
+	it("a brief written on the researcher's final allowed turn still lands done", async () => {
+		const chat = chatStore.createChat("Test: research brief on last turn");
+		trackChat(chat.id);
+		chatStore.saveMessages(chat.id, nativeToolMessages("hi", "research", "call-cap2", RESEARCH_INPUT));
+		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-cap2" });
+		trackJob(job.id);
+		const delivery = fakeDeliver();
+		const runner = createJobRunner({ chatStore, jobStore, deliver: delivery.deliver, searchProvider: () => null });
+		const scripted = toolLoopResearcher(30, 30);
+		researchModelOverride.current = scripted.engine;
+		try {
+			await runner.runJob(job.id);
+		} finally {
+			researchModelOverride.current = undefined;
+		}
+
+		assert.equal(scripted.calls(), 30);
+		const done = jobStore.getJob(job.id)!;
+		assert.equal(done.status, "done");
+		assert.equal((done.result as ResearchResult).brief, BRIEF);
+	});
+
 	it("a failing runner still steers (the teacher learns the outcome) and the job lands error", async () => {
 		const chat = chatStore.createChat("Test: runner failure");
 		trackChat(chat.id);

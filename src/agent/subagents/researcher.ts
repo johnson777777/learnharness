@@ -86,6 +86,9 @@ export interface ResearcherRunOptions {
 	chatId?: string;
 }
 
+/** Max model calls per research run. */
+export const RESEARCHER_MAX_TURNS = 30;
+
 /**
  * Run the researcher to completion: isolated context, web tools only, final
  * text = the brief. The engine and search seam are injectable so tests run
@@ -94,17 +97,19 @@ export interface ResearcherRunOptions {
 export async function runResearcherAgent(prompt: string, opts: ResearcherRunOptions = {}): Promise<string> {
 	const tools = Object.values(createWebTools(opts.search ?? (() => null)));
 	if (opts.pdfDir) tools.push(...Object.values(createPdfReadTools(opts.pdfDir)));
-	const { text } = await runSubagent(tools, {
+	const { text, endedAtTurnCap } = await runSubagent(tools, {
 		role: "researcher",
 		prompt,
 		engine: opts.engine,
 		systemPrompt: INSTRUCTIONS,
-		maxTurns: 12,
+		maxTurns: RESEARCHER_MAX_TURNS,
 		abortSignal: opts.abortSignal,
 		onUsage: opts.onUsage,
 		onToolStart: opts.onToolStart,
 		chatId: opts.chatId,
 	});
+	// Out of turns mid-research: the last text is a progress note, never a brief.
+	if (endedAtTurnCap) throw new Error(`the researcher hit its ${RESEARCHER_MAX_TURNS}-turn limit before writing a brief`);
 	return text;
 }
 

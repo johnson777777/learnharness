@@ -53,6 +53,9 @@ export interface SubagentRunResult {
 	newMessages: AgentMessage[];
 	/** The final assistant text (the deliverable). */
 	text: string;
+	/** True when the run ended on maxTurns while the model still wanted to
+	 *  keep calling tools — `text` is then a mid-run note, not a deliverable. */
+	endedAtTurnCap: boolean;
 }
 
 export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
@@ -65,6 +68,7 @@ export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
 export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult> {
 	const engine = subagentEngine(opts.role, opts.engine);
 	let turns = 0;
+	let endedAtTurnCap = false;
 	// Debug recorder (owner, 2026-10-04): raw provider events per job run.
 	const providerEvents = opts.chatId ? providerEventObserver(opts.chatId, `job:${opts.role}`) : undefined;
 	const sessionId = randomUUID();
@@ -86,9 +90,10 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		// exits before the steering poll, exactly the old boolean-true).
 		finishTurn: (turn) => {
 			turns++;
-			return turns >= opts.maxTurns || opts.shouldStop?.(turn.message, turn.toolResults) === true
-				? { action: "end" }
-				: undefined;
+			if (opts.shouldStop?.(turn.message, turn.toolResults) === true) return { action: "end" };
+			if (turns < opts.maxTurns) return undefined;
+			endedAtTurnCap = turn.message.stopReason === "toolUse";
+			return { action: "end" };
 		},
 	});
 
@@ -164,5 +169,5 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 				.map((c) => c.text)
 				.join("")
 		: "";
-	return { newMessages, text };
+	return { newMessages, text, endedAtTurnCap };
 }
